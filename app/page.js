@@ -129,13 +129,16 @@ export default function Home() {
     setCompareResult(null);
     try {
       const r = await callApi(code);
-      setResult(r);
+      let cr = null;
       if (compareMode && compareCode.trim()) {
-        const cr = await callApi(compareCode);
-        setCompareResult(cr);
+        cr = await callApi(compareCode);
       }
+      setResult(r);
+      setCompareResult(cr);
       setTab("analysis");
     } catch (e) {
+      setResult(null);
+      setCompareResult(null);
       setError(e.message || "Analysis failed.");
     }
     setLoading(false);

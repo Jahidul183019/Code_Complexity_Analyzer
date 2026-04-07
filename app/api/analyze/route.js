@@ -29,16 +29,124 @@ const OPENROUTER_FREE_FALLBACK_MODELS = [
   "google/gemma-2-9b-it:free",
 ];
 
+function validateCodeStructure(code) {
+  const src = code.trim();
+  if (src.length < 8) {
+    return "Code is too short to analyze.";
+  }
+
+  // Fast signal that input resembles C/C++ code.
+  const hasCppSignals =
+    /#include\s*[<"]/m.test(src) ||
+    /\b(int|void|char|float|double|long|short|bool|string|class|struct|template|namespace|using)\b/.test(src) ||
+    /\b(for|while|do|if|else|switch|case|return)\b/.test(src) ||
+    /[;{}]/.test(src);
+
+  if (!hasCppSignals) {
+    return "Input does not look like valid C/C++ code.";
+  }
+
+  const stack = [];
+  const pairs = { ")": "(", "}": "{", "]": "[" };
+  let inSingle = false;
+  let inDouble = false;
+  let inLineComment = false;
+  let inBlockComment = false;
+
+  for (let i = 0; i < src.length; i += 1) {
+    const ch = src[i];
+    const next = src[i + 1];
+
+    if (inLineComment) {
+      if (ch === "\n") inLineComment = false;
+      continue;
+    }
+
+    if (inBlockComment) {
+      if (ch === "*" && next === "/") {
+        inBlockComment = false;
+        i += 1;
+      }
+      continue;
+    }
+
+    if (!inSingle && !inDouble && ch === "/" && next === "/") {
+      inLineComment = true;
+      i += 1;
+      continue;
+    }
+
+    if (!inSingle && !inDouble && ch === "/" && next === "*") {
+      inBlockComment = true;
+      i += 1;
+      continue;
+    }
+
+    if (!inDouble && ch === "'" && src[i - 1] !== "\\") {
+      inSingle = !inSingle;
+      continue;
+    }
+
+    if (!inSingle && ch === '"' && src[i - 1] !== "\\") {
+      inDouble = !inDouble;
+      continue;
+    }
+
+    if (inSingle || inDouble) continue;
+
+    if (ch === "(" || ch === "{" || ch === "[") {
+      stack.push(ch);
+      continue;
+    }
+
+    if (ch === ")" || ch === "}" || ch === "]") {
+      const top = stack.pop();
+      if (top !== pairs[ch]) {
+        return "Invalid code: unbalanced brackets or parentheses.";
+      }
+    }
+  }
+
+  if (inSingle || inDouble) {
+    return "Invalid code: unterminated string or character literal.";
+  }
+
+  if (inBlockComment) {
+    return "Invalid code: unterminated block comment.";
+  }
+
+  if (stack.length > 0) {
+    return "Invalid code: unbalanced brackets or parentheses.";
+  }
+
+  return null;
+}
+
+function validateAnalyzerResultShape(result) {
+  if (!result || typeof result !== "object") return false;
+
+  const hasComplexity =
+    typeof result.timeComplexity === "string" &&
+    /^O\s*\(.+\)$/i.test(result.timeComplexity.trim()) &&
+    typeof result.spaceComplexity === "string" &&
+    /^O\s*\(.+\)$/i.test(result.spaceComplexity.trim());
+
+  return hasComplexity;
+}
+
 function extractFirstJsonObject(text) {
-  const start = text.indexOf("{");
+  // Remove markdown code fences first
+  let cleaned = text.replace(/```json\n?|```\n?/g, "").trim();
+  
+  const start = cleaned.indexOf("{");
   if (start === -1) return null;
 
   let depth = 0;
   let inString = false;
   let escape = false;
 
-  for (let i = start; i < text.length; i++) {
-    const ch = text[i];
+  for (let i = start; i < cleaned.length; i++) {
+    const ch = cleaned[i];
 
     if (inString) {
       if (escape) {
@@ -60,7 +168,7 @@ function extractFirstJsonObject(text) {
     if (ch === "}") {
       depth -= 1;
       if (depth === 0) {
-        return text.slice(start, i + 1);
+        return cleaned.slice(start, i + 1);
       }
     }
   }
@@ -125,6 +233,11 @@ export async function POST(request) {
       );
     }
 
+    const validationError = validateCodeStructure(code);
+    if (validationError) {
+      return Response.json({ error: validationError }, { status: 400 });
+    }
+
     const apiKey = process.env.OPENROUTER_API_KEY;
     const model = process.env.OPENROUTER_MODEL || DEFAULT_OPENROUTER_MODEL;
     if (!apiKey) {
@@ -187,12 +300,13 @@ export async function POST(request) {
       );
     }
 
-    const cleaned = text.replace(/```json|```/g, "").trim();
+    const cleaned = text.replace(/```json\n?|```\n?/g, "").trim();
     const jsonCandidate = cleaned.startsWith("{") ? cleaned : extractFirstJsonObject(cleaned);
 
     if (!jsonCandidate) {
+      console.error("OpenRouter API error: no JSON found in response:", text.slice(0, 500));
       return Response.json(
-        { error: "Model returned non-JSON output. Please try again." },
+        { error: "Model returned non-JSON output. Try a different model or check your prompt." },
         { status: 502 }
       );
     }
@@ -200,11 +314,18 @@ export async function POST(request) {
     let result;
     try {
       result = JSON.parse(jsonCandidate);
-    } catch {
-      console.error("OpenRouter API error: invalid JSON payload", cleaned.slice(0, 500));
+    } catch (parseErr) {
+      console.error("OpenRouter API error: invalid JSON payload:", jsonCandidate.slice(0, 300), "Error:", parseErr.message);
       return Response.json(
-        { error: "Model returned non-JSON output. Please try again." },
+        { error: `Invalid JSON output: ${parseErr.message}. Try again or switch models.` },
         { status: 502 }
+      );
+    }
+
+    if (!validateAnalyzerResultShape(result)) {
+      return Response.json(
+        { error: "Invalid code analysis output. Please submit syntactically valid C/C++ code." },
+        { status: 422 }
       );
     }
 
