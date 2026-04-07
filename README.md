@@ -51,6 +51,9 @@ vercel --prod   # deploy to production
 
 Set the env var either during the CLI prompts or in the Vercel dashboard under **Settings → Environment Variables**.
 
+Optional model override:
+- `GEMINI_MODEL` (default: `gemini-2.0-flash`)
+
 ## Project Structure
 
 ```
