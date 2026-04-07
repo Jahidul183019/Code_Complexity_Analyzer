@@ -36,77 +36,45 @@ export async function POST(request) {
       );
     }
 
-    const apiKey = process.env.OPENAI_API_KEY;
-    const model = process.env.OPENAI_MODEL || "gpt-4o-mini";
+    const apiKey = process.env.GEMINI_API_KEY;
+    const model = process.env.GEMINI_MODEL || "gemini-1.5-flash";
     if (!apiKey) {
       return Response.json(
-        { error: "OPENAI_API_KEY not configured on the server" },
+        { error: "GEMINI_API_KEY not configured on the server" },
         { status: 500 }
       );
     }
 
-    const headers = {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
-    };
-
-    const basePayload = {
-      model,
-      temperature: 0,
-      response_format: { type: "json_object" },
-      messages: [
-        { role: "system", content: SYSTEM_PROMPT },
-        { role: "user", content: `Analyze this code:\n\n${code}` },
-      ],
-    };
-
-    let resp = await fetch("https://api.openai.com/v1/chat/completions", {
+    const resp = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
+      {
       method: "POST",
-      headers,
+      headers: {
+        "Content-Type": "application/json",
+      },
       body: JSON.stringify({
-        ...basePayload,
-        max_tokens: 1500,
+        contents: [
+          {
+            role: "user",
+            parts: [
+              {
+                text: `${SYSTEM_PROMPT}\n\nAnalyze this code:\n\n${code}`,
+              },
+            ],
+          },
+        ],
+        generationConfig: {
+          temperature: 0,
+          responseMimeType: "application/json",
+          maxOutputTokens: 1500,
+        },
       }),
-    });
-
-    // Some newer models require max_completion_tokens instead of max_tokens.
-    if (!resp.ok && resp.status === 400) {
-      const firstErrText = await resp.text();
-      let shouldRetryWithMaxCompletionTokens = false;
-
-      try {
-        const firstErrJson = JSON.parse(firstErrText);
-        const msg = firstErrJson?.error?.message || "";
-        shouldRetryWithMaxCompletionTokens =
-          msg.includes("max_tokens") && msg.includes("max_completion_tokens");
-      } catch {
-        shouldRetryWithMaxCompletionTokens = false;
       }
-
-      if (shouldRetryWithMaxCompletionTokens) {
-        resp = await fetch("https://api.openai.com/v1/chat/completions", {
-          method: "POST",
-          headers,
-          body: JSON.stringify({
-            ...basePayload,
-            max_completion_tokens: 1500,
-          }),
-        });
-      } else {
-        // Rebuild response-like handling path with captured text.
-        console.error("OpenAI API error:", resp.status, firstErrText);
-        let details = "Upstream API error";
-        try {
-          const parsed = JSON.parse(firstErrText);
-          details = parsed?.error?.message || details;
-        } catch {}
-        return Response.json({ error: details }, { status: 502 });
-      }
-    }
+    );
 
     if (!resp.ok) {
       const errBody = await resp.text();
-      console.error("OpenAI API error:", resp.status, errBody);
+      console.error("Gemini API error:", resp.status, errBody);
       let details = "Upstream API error";
       try {
         const parsed = JSON.parse(errBody);
@@ -116,7 +84,7 @@ export async function POST(request) {
     }
 
     const data = await resp.json();
-    const text = data.choices?.[0]?.message?.content || "";
+    const text = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
     const cleaned = text.replace(/```json|```/g, "").trim();
     const result = JSON.parse(cleaned);
 
