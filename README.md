@@ -1,6 +1,6 @@
 # Code Complexity Analyzer — TC & SC Predictor
 
-Paste C/C++ code and instantly get Big-O time & space complexity with step-by-step explanations. Powered by Google Gemini.
+Paste C/C++ code and instantly get Big-O time & space complexity with step-by-step explanations. Powered by OpenRouter.
 
 ## Features
 
@@ -20,7 +20,7 @@ cd code-complexity-analyzer
 # 2. Install dependencies
 npm install
 
-# 3. Add your Gemini API key
+# 3. Add your OpenRouter API key
 cp .env.example .env.local
 # Edit .env.local and paste your key
 
@@ -37,8 +37,8 @@ Open [http://localhost:3000](http://localhost:3000).
 1. Push this repo to GitHub
 2. Go to [vercel.com/new](https://vercel.com/new) → Import repository
 3. Add environment variable:
-   - **Name:** `GEMINI_API_KEY`
-   - **Value:** your key from [aistudio.google.com/app/apikey](https://aistudio.google.com/app/apikey)
+   - **Name:** `OPENROUTER_API_KEY`
+   - **Value:** your key from [openrouter.ai/keys](https://openrouter.ai/keys)
 4. Click **Deploy**
 
 ### Option B — Via Vercel CLI
@@ -52,7 +52,7 @@ vercel --prod   # deploy to production
 Set the env var either during the CLI prompts or in the Vercel dashboard under **Settings → Environment Variables**.
 
 Optional model override:
-- `GEMINI_MODEL` (default: `gemini-2.0-flash`)
+- `OPENROUTER_MODEL` (default: `openrouter/auto`)
 
 ## Project Structure
 
@@ -60,7 +60,7 @@ Optional model override:
 ├── app/
 │   ├── api/
 │   │   └── analyze/
-│   │       └── route.js      # Server-side API → calls Gemini
+│   │       └── route.js      # Server-side API → calls OpenRouter
 │   ├── globals.css
 │   ├── layout.js
 │   └── page.js               # Client UI

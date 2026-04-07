@@ -21,55 +21,93 @@ Rules:
 - Keep explanations clear, educational, and concise.
 - confidence should be "high" if the code is straightforward, "medium" if heuristic, "low" if ambiguous.`;
 
-const GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta";
+const OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions";
+const DEFAULT_OPENROUTER_MODEL = "openrouter/auto";
+const OPENROUTER_FREE_FALLBACK_MODELS = [
+  "meta-llama/llama-3.1-8b-instruct:free",
+  "mistralai/mistral-7b-instruct:free",
+  "google/gemma-2-9b-it:free",
+];
 
-function normalizeModelName(model) {
-  if (!model) return "";
-  return model.startsWith("models/") ? model : `models/${model}`;
-}
+function extractFirstJsonObject(text) {
+  const start = text.indexOf("{");
+  if (start === -1) return null;
 
-async function callGeminiGenerateContent({ apiKey, model, promptText }) {
-  const modelName = normalizeModelName(model);
-  return fetch(
-    `${GEMINI_API_BASE}/${modelName}:generateContent?key=${apiKey}`,
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        contents: [
-          {
-            role: "user",
-            parts: [{ text: promptText }],
-          },
-        ],
-        generationConfig: {
-          temperature: 0,
-          responseMimeType: "application/json",
-          maxOutputTokens: 1500,
-        },
-      }),
+  let depth = 0;
+  let inString = false;
+  let escape = false;
+
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
+
+    if (inString) {
+      if (escape) {
+        escape = false;
+      } else if (ch === "\\") {
+        escape = true;
+      } else if (ch === '"') {
+        inString = false;
+      }
+      continue;
     }
-  );
+
+    if (ch === '"') {
+      inString = true;
+      continue;
+    }
+
+    if (ch === "{") depth += 1;
+    if (ch === "}") {
+      depth -= 1;
+      if (depth === 0) {
+        return text.slice(start, i + 1);
+      }
+    }
+  }
+
+  return null;
 }
 
-function pickFallbackModel(models) {
-  const supported = (models || []).filter((m) =>
-    (m.supportedGenerationMethods || []).includes("generateContent")
-  );
+async function callOpenRouter({ apiKey, model, promptText }) {
+  return fetch(OPENROUTER_API_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${apiKey}`,
+      "HTTP-Referer": "https://code-complexity-analyzer.vercel.app",
+      "X-Title": "Code Complexity Analyzer",
+    },
+    body: JSON.stringify({
+      model,
+      temperature: 0,
+      max_tokens: 1200,
+      messages: [
+        { role: "system", content: SYSTEM_PROMPT },
+        { role: "user", content: `Analyze this code:\n\n${promptText}` },
+      ],
+    }),
+  });
+}
 
-  if (supported.length === 0) return null;
+function mapOpenRouterError(errText, fallback = "Upstream API error") {
+  let details = fallback;
 
-  const preferred = supported.find((m) =>
-    m.name?.includes("gemini-2.0-flash")
-  );
-  if (preferred) return preferred.name;
+  try {
+    const parsed = JSON.parse(errText);
+    const msg = parsed?.error?.message || parsed?.message || "";
+    const code = parsed?.error?.code || parsed?.code;
 
-  const anyFlash = supported.find((m) => m.name?.includes("flash"));
-  if (anyFlash) return anyFlash.name;
+    if (code === 429 || /quota|rate limit|credits|insufficient/i.test(msg)) {
+      if (/insufficient|credit|balance|quota/i.test(msg)) {
+        return "OpenRouter free quota/credits are exhausted for this key. Try a different free model or a new key.";
+      }
+      return "OpenRouter rate limit reached. Please wait and retry.";
+    }
 
-  return supported[0].name;
+    details = msg || details;
+  } catch {}
+
+  return details;
 }
 
 export async function POST(request) {
@@ -87,18 +125,18 @@ export async function POST(request) {
       );
     }
 
-    const apiKey = process.env.GEMINI_API_KEY;
-    const model = process.env.GEMINI_MODEL || "gemini-2.0-flash";
+    const apiKey = process.env.OPENROUTER_API_KEY;
+    const model = process.env.OPENROUTER_MODEL || DEFAULT_OPENROUTER_MODEL;
     if (!apiKey) {
       return Response.json(
-        { error: "GEMINI_API_KEY not configured on the server" },
+        { error: "OPENROUTER_API_KEY not configured on the server" },
         { status: 500 }
       );
     }
 
-    const promptText = `${SYSTEM_PROMPT}\n\nAnalyze this code:\n\n${code}`;
+    const promptText = code;
 
-    let resp = await callGeminiGenerateContent({
+    let resp = await callOpenRouter({
       apiKey,
       model,
       promptText,
@@ -106,66 +144,69 @@ export async function POST(request) {
 
     if (!resp.ok) {
       const firstErrBody = await resp.text();
-      let canFallback = false;
+      console.error("OpenRouter API error:", resp.status, firstErrBody);
 
-      try {
-        const parsed = JSON.parse(firstErrBody);
-        const msg = parsed?.error?.message || "";
-        canFallback =
-          msg.includes("not found") || msg.includes("not supported for generateContent");
-      } catch {}
-
-      if (canFallback) {
-        const modelsResp = await fetch(`${GEMINI_API_BASE}/models?key=${apiKey}`);
-        if (modelsResp.ok) {
-          const modelsData = await modelsResp.json();
-          const fallbackModel = pickFallbackModel(modelsData.models || []);
-          if (fallbackModel && normalizeModelName(model) !== fallbackModel) {
-            resp = await callGeminiGenerateContent({
-              apiKey,
-              model: fallbackModel,
-              promptText,
-            });
-          } else {
-            console.error("Gemini API error:", 502, firstErrBody);
-            return Response.json(
-              { error: "No compatible Gemini generateContent model found for this key." },
-              { status: 502 }
-            );
+      // If selected model is unavailable/blocked, try free fallback models.
+      const modelIssue = /model|not found|not available|unavailable|unsupported/i.test(firstErrBody);
+      if (modelIssue) {
+        for (const fallbackModel of OPENROUTER_FREE_FALLBACK_MODELS) {
+          if (fallbackModel === model) continue;
+          const retryResp = await callOpenRouter({
+            apiKey,
+            model: fallbackModel,
+            promptText,
+          });
+          if (retryResp.ok) {
+            resp = retryResp;
+            break;
           }
-        } else {
-          console.error("Gemini API error:", 502, firstErrBody);
-          return Response.json(
-            { error: "Configured Gemini model is unavailable, and model discovery failed." },
-            { status: 502 }
-          );
         }
-      } else {
-        console.error("Gemini API error:", resp.status, firstErrBody);
-        let details = "Upstream API error";
-        try {
-          const parsed = JSON.parse(firstErrBody);
-          details = parsed?.error?.message || details;
-        } catch {}
+      }
+
+      if (!resp.ok) {
+        const details = mapOpenRouterError(firstErrBody);
         return Response.json({ error: details }, { status: 502 });
       }
     }
 
     if (!resp.ok) {
       const errBody = await resp.text();
-      console.error("Gemini API error:", resp.status, errBody);
-      let details = "Upstream API error";
-      try {
-        const parsed = JSON.parse(errBody);
-        details = parsed?.error?.message || details;
-      } catch {}
+      console.error("OpenRouter API error:", resp.status, errBody);
+      const details = mapOpenRouterError(errBody);
       return Response.json({ error: details }, { status: 502 });
     }
 
     const data = await resp.json();
-    const text = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
+    const text = data?.choices?.[0]?.message?.content?.trim() || "";
+
+    if (!text) {
+      console.error("OpenRouter API error: empty response", data);
+      return Response.json(
+        { error: "Model returned an empty response. Try again or switch model." },
+        { status: 502 }
+      );
+    }
+
     const cleaned = text.replace(/```json|```/g, "").trim();
-    const result = JSON.parse(cleaned);
+    const jsonCandidate = cleaned.startsWith("{") ? cleaned : extractFirstJsonObject(cleaned);
+
+    if (!jsonCandidate) {
+      return Response.json(
+        { error: "Model returned non-JSON output. Please try again." },
+        { status: 502 }
+      );
+    }
+
+    let result;
+    try {
+      result = JSON.parse(jsonCandidate);
+    } catch {
+      console.error("OpenRouter API error: invalid JSON payload", cleaned.slice(0, 500));
+      return Response.json(
+        { error: "Model returned non-JSON output. Please try again." },
+        { status: 502 }
+      );
+    }
 
     return Response.json(result);
   } catch (err) {
