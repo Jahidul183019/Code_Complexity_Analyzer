@@ -43,7 +43,7 @@ function validateCodeStructure(code) {
     /[;{}()]/.test(src);
 
   if (!hasCppSignals) {
-    return "Input does not look like valid C/C++ code.";
+    return "Got syntax error: input is not valid C/C++ code.";
   }
 
   let sanitized;
@@ -411,7 +411,7 @@ export async function POST(request) {
 
     if (!validateAnalyzerResultShape(result)) {
       return Response.json(
-        { error: "Invalid code analysis output. Please submit syntactically valid C/C++ code." },
+        { error: "Got syntax error: please submit syntactically valid C/C++ code." },
         { status: 422 }
       );
     }
