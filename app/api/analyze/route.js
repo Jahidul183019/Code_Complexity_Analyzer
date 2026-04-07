@@ -45,31 +45,74 @@ export async function POST(request) {
       );
     }
 
-    const resp = await fetch("https://api.openai.com/v1/chat/completions", {
+    const headers = {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${apiKey}`,
+    };
+
+    const basePayload = {
+      model,
+      temperature: 0,
+      response_format: { type: "json_object" },
+      messages: [
+        { role: "system", content: SYSTEM_PROMPT },
+        { role: "user", content: `Analyze this code:\n\n${code}` },
+      ],
+    };
+
+    let resp = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
-      },
+      headers,
       body: JSON.stringify({
-        model,
-        temperature: 0,
+        ...basePayload,
         max_tokens: 1500,
-        response_format: { type: "json_object" },
-        messages: [
-          { role: "system", content: SYSTEM_PROMPT },
-          { role: "user", content: `Analyze this code:\n\n${code}` },
-        ],
       }),
     });
+
+    // Some newer models require max_completion_tokens instead of max_tokens.
+    if (!resp.ok && resp.status === 400) {
+      const firstErrText = await resp.text();
+      let shouldRetryWithMaxCompletionTokens = false;
+
+      try {
+        const firstErrJson = JSON.parse(firstErrText);
+        const msg = firstErrJson?.error?.message || "";
+        shouldRetryWithMaxCompletionTokens =
+          msg.includes("max_tokens") && msg.includes("max_completion_tokens");
+      } catch {
+        shouldRetryWithMaxCompletionTokens = false;
+      }
+
+      if (shouldRetryWithMaxCompletionTokens) {
+        resp = await fetch("https://api.openai.com/v1/chat/completions", {
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            ...basePayload,
+            max_completion_tokens: 1500,
+          }),
+        });
+      } else {
+        // Rebuild response-like handling path with captured text.
+        console.error("OpenAI API error:", resp.status, firstErrText);
+        let details = "Upstream API error";
+        try {
+          const parsed = JSON.parse(firstErrText);
+          details = parsed?.error?.message || details;
+        } catch {}
+        return Response.json({ error: details }, { status: 502 });
+      }
+    }
 
     if (!resp.ok) {
       const errBody = await resp.text();
       console.error("OpenAI API error:", resp.status, errBody);
-      return Response.json(
-        { error: "Upstream API error" },
-        { status: 502 }
-      );
+      let details = "Upstream API error";
+      try {
+        const parsed = JSON.parse(errBody);
+        details = parsed?.error?.message || details;
+      } catch {}
+      return Response.json({ error: details }, { status: 502 });
     }
 
     const data = await resp.json();
