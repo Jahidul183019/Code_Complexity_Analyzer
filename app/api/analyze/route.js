@@ -30,7 +30,7 @@ const OPENROUTER_FREE_FALLBACK_MODELS = [
 ];
 
 function validateCodeStructure(code) {
-  const src = code.trim();
+  const src = code.replace(/\r\n/g, "\n").trim();
   if (src.length < 8) {
     return "Code is too short to analyze.";
   }
@@ -38,88 +38,175 @@ function validateCodeStructure(code) {
   // Fast signal that input resembles C/C++ code.
   const hasCppSignals =
     /#include\s*[<"]/m.test(src) ||
-    /\b(int|void|char|float|double|long|short|bool|string|class|struct|template|namespace|using)\b/.test(src) ||
-    /\b(for|while|do|if|else|switch|case|return)\b/.test(src) ||
-    /[;{}]/.test(src);
+    /\b(int|void|char|float|double|long|short|bool|string|class|struct|template|namespace|using|auto|constexpr|typename|std)\b/.test(src) ||
+    /\b(for|while|do|if|else|switch|case|return|cout|cin|printf|scanf)\b/.test(src) ||
+    /[;{}()]/.test(src);
 
   if (!hasCppSignals) {
     return "Input does not look like valid C/C++ code.";
   }
 
+  let sanitized;
+  try {
+    sanitized = stripCommentsAndStrings(src);
+  } catch (err) {
+    return err.message || "Invalid code syntax.";
+  }
+
   const stack = [];
   const pairs = { ")": "(", "}": "{", "]": "[" };
+
+  let lineNo = 1;
+  for (let i = 0; i < sanitized.length; i += 1) {
+    const ch = sanitized[i];
+    if (ch === "\n") {
+      lineNo += 1;
+      continue;
+    }
+
+    if (ch === "(" || ch === "{" || ch === "[") {
+      stack.push({ ch, line: lineNo });
+      continue;
+    }
+
+    if (ch === ")" || ch === "}" || ch === "]") {
+      const top = stack.pop();
+      if (!top || top.ch !== pairs[ch]) {
+        return `Syntax error near line ${lineNo}: unbalanced brackets or parentheses.`;
+      }
+    }
+  }
+
+  if (stack.length > 0) {
+    const last = stack[stack.length - 1];
+    return `Syntax error near line ${last.line}: missing closing token for '${last.ch}'.`;
+  }
+
+  const lines = sanitized.split("\n");
+  for (let i = 0; i < lines.length; i += 1) {
+    const raw = lines[i];
+    const line = raw.trim();
+    const lineNo = i + 1;
+
+    if (!line || line.startsWith("#")) continue;
+
+    if (/\b(for|if|while|switch)\b/.test(line) && !/\b(for|if|while|switch)\s*\(/.test(line)) {
+      return `Syntax error near line ${lineNo}: control statement is missing parentheses.`;
+    }
+
+    for (const match of line.matchAll(/\bfor\s*\(([^)]*)\)/g)) {
+      const header = match[1];
+      const semicolonCount = (header.match(/;/g) || []).length;
+      if (semicolonCount !== 2) {
+        return `Syntax error near line ${lineNo}: for-loop header must contain exactly two ';'.`;
+      }
+    }
+
+    if (/^\s*case\b/.test(line) && !/:\s*$/.test(line)) {
+      return `Syntax error near line ${lineNo}: case label must end with ':'.`;
+    }
+
+    if (/\b(return|break|continue|throw)\b/.test(line) && !/;\s*$/.test(line)) {
+      return `Syntax error near line ${lineNo}: missing ';' after statement.`;
+    }
+  }
+
+  const lastSignificant = lines
+    .map((v) => v.trim())
+    .filter((v) => v && !v.startsWith("#"))
+    .pop();
+
+  if (lastSignificant && /(?:[+\-*/%&|^=!<>]|\?|:)\s*$/.test(lastSignificant)) {
+    return "Incomplete code: expression appears to end with an operator.";
+  }
+
+  if (/\b(for|if|while|switch)\s*\([^)]*$/m.test(sanitized)) {
+    return "Incomplete code: missing ')' in control statement.";
+  }
+
+  if (/\b(do|else)\s*$/.test(lastSignificant || "")) {
+    return "Incomplete code: dangling control keyword at the end.";
+  }
+
+  return null;
+}
+
+function stripCommentsAndStrings(input) {
+  let out = "";
   let inSingle = false;
   let inDouble = false;
   let inLineComment = false;
   let inBlockComment = false;
 
-  for (let i = 0; i < src.length; i += 1) {
-    const ch = src[i];
-    const next = src[i + 1];
+  for (let i = 0; i < input.length; i += 1) {
+    const ch = input[i];
+    const next = input[i + 1];
+    const prev = input[i - 1];
 
     if (inLineComment) {
-      if (ch === "\n") inLineComment = false;
+      if (ch === "\n") {
+        inLineComment = false;
+        out += "\n";
+      } else {
+        out += " ";
+      }
       continue;
     }
 
     if (inBlockComment) {
       if (ch === "*" && next === "/") {
         inBlockComment = false;
+        out += "  ";
         i += 1;
+      } else {
+        out += ch === "\n" ? "\n" : " ";
       }
       continue;
     }
 
     if (!inSingle && !inDouble && ch === "/" && next === "/") {
       inLineComment = true;
+      out += "  ";
       i += 1;
       continue;
     }
 
     if (!inSingle && !inDouble && ch === "/" && next === "*") {
       inBlockComment = true;
+      out += "  ";
       i += 1;
       continue;
     }
 
-    if (!inDouble && ch === "'" && src[i - 1] !== "\\") {
+    if (!inDouble && ch === "'" && prev !== "\\") {
       inSingle = !inSingle;
+      out += " ";
       continue;
     }
 
-    if (!inSingle && ch === '"' && src[i - 1] !== "\\") {
+    if (!inSingle && ch === '"' && prev !== "\\") {
       inDouble = !inDouble;
+      out += " ";
       continue;
     }
 
-    if (inSingle || inDouble) continue;
-
-    if (ch === "(" || ch === "{" || ch === "[") {
-      stack.push(ch);
+    if (inSingle || inDouble) {
+      out += ch === "\n" ? "\n" : " ";
       continue;
     }
 
-    if (ch === ")" || ch === "}" || ch === "]") {
-      const top = stack.pop();
-      if (top !== pairs[ch]) {
-        return "Invalid code: unbalanced brackets or parentheses.";
-      }
-    }
+    out += ch;
   }
 
   if (inSingle || inDouble) {
-    return "Invalid code: unterminated string or character literal.";
+    throw new Error("Invalid code: unterminated string or character literal.");
   }
 
   if (inBlockComment) {
-    return "Invalid code: unterminated block comment.";
+    throw new Error("Invalid code: unterminated block comment.");
   }
 
-  if (stack.length > 0) {
-    return "Invalid code: unbalanced brackets or parentheses.";
-  }
-
-  return null;
+  return out;
 }
 
 function validateAnalyzerResultShape(result) {
